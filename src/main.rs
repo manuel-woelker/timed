@@ -4,63 +4,74 @@ extern crate tokio_core;
 extern crate tokio_proto;
 extern crate tokio_service;
 extern crate byteorder;
+extern crate time;
 
 use std::io;
-use std::io::Write;
 use std::str;
-use tokio_core::io::{Codec, EasyBuf};
 use tokio_proto::pipeline::ServerProto;
-use tokio_core::io::{Io, Framed};
+use tokio_core::io::Io;
 
 use tokio_service::Service;
 use tokio_proto::TcpServer;
 
-use futures::{future, Future, BoxFuture};
+use futures::{future, Future, BoxFuture, Stream, Sink, Poll, Async, StartSend, AsyncSink};
 
-use byteorder::{BigEndian, WriteBytesExt};
+use byteorder::{BigEndian, ByteOrder};
 
-pub struct TimeCodec;
 
-impl Codec for TimeCodec {
-    type In = u32;
-    type Out = u32;
-    fn decode(&mut self, buf: &mut EasyBuf) -> io::Result<Option<Self::In>> {
-        let len = buf.len();
-        println!("DECODE {}", len);
-        if len <= 0 {
-            return Ok(None);
+pub struct TimeProto;
+
+pub struct TimeTransport<T: Io + 'static> {
+    io: T,
+    done: bool,
+}
+
+impl<T: Io + 'static> Stream for TimeTransport<T> {
+    type Item = ();
+    type Error = io::Error;
+
+    fn poll(&mut self) -> Poll<Option<()>, io::Error> {
+        if !self.done {
+            self.done = true;
+            return Ok(Async::Ready(Some(())));
         }
-        buf.drain_to(len);
-        Ok(Some(0))
-        //        Ok(None)
-    }
-    fn encode(&mut self, msg: u32, buf: &mut Vec<u8>)
-              -> io::Result<()>
-    {
-        println!("ENCODE {}", buf.capacity());
-        buf.resize(4, 0);
-//        buf.extend(msg.as_bytes());
-        let mut writer = io::Cursor::new(buf.as_mut());
-        writer.write_u32::<BigEndian>(msg).unwrap();
-        Ok(())
+        return Ok(Async::Ready(None));
     }
 
 }
 
-pub struct TimeProto;
+
+impl<T: Io + 'static> Sink for TimeTransport<T> {
+    type SinkItem = u32;
+    type SinkError = io::Error;
+
+    fn start_send(&mut self, item: u32) -> StartSend<u32, io::Error> {
+
+        let mut buffer = [0u8; 4];
+        BigEndian::write_u32(&mut buffer, item);
+        self.io.write(&buffer)?;
+        self.io.flush()?;
+
+        return Ok(AsyncSink::Ready);
+    }
+
+    fn poll_complete(&mut self) -> Poll<(), io::Error> {
+        return Ok(Async::Ready(()));
+    }
+}
 
 impl<T: Io + 'static> ServerProto<T> for TimeProto {
     /// For this protocol style, `Request` matches the codec `In` type
-    type Request = u32;
+    type Request = ();
 
     /// For this protocol style, `Response` matches the coded `Out` type
     type Response = u32;
 
     /// A bit of boilerplate to hook in the codec:
-    type Transport = Framed<T, TimeCodec>;
+    type Transport = TimeTransport<T>;
     type BindTransport = Result<Self::Transport, io::Error>;
     fn bind_transport(&self, io: T) -> Self::BindTransport {
-        Ok(io.framed(TimeCodec))
+        Ok(TimeTransport{io: io, done: false})
     }
 }
 
@@ -68,7 +79,7 @@ pub struct TimeService;
 
 impl Service for TimeService {
     // These types must match the corresponding protocol types:
-    type Request = u32;
+    type Request = ();
     type Response = u32;
 
     // For non-streaming protocols, service errors are always io::Error
@@ -78,10 +89,9 @@ impl Service for TimeService {
     type Future = BoxFuture<Self::Response, Self::Error>;
 
     // Produce a future for computing a response from a request.
-    fn call(&self, req: Self::Request) -> Self::Future {
-        println!("CALL");
+    fn call(&self, _: Self::Request) -> Self::Future {
         // In this case, the response is immediate.
-        future::ok(1634952804).boxed()
+        future::ok(time::get_time().sec as u32 + 2208988800).boxed()
     }
 }
 
